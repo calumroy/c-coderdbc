@@ -891,6 +891,16 @@ void CiMainGenerator::PrintPackCommonText(const std::string& arrtxt, const CiExp
             fwriter.Append("  }");
           }
         }
+        // Add the final else block for the case where no expected multiplex value matches. Just encode all signals in the byte.
+        if (!first)
+        {
+            fwriter.Append("  else {");
+            if ( !sgs->to_bytes[i].empty() )
+            {
+                fwriter.Append("    %s[%d] |= (uint8_t) ( %s );", arrtxt.c_str(), i, sgs->to_bytes[i].c_str());
+            }
+            fwriter.Append("  }");
+        }
       }
     }
     else 
