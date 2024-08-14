@@ -694,7 +694,7 @@ void CiMainGenerator::WriteUnpackBody(const CiExpr_t* sgs)
   {
     const char* masterSname = masterSignal->Name.c_str();
     auto masterExpr = sgs->to_signals[masterSignal->StartBit / 8]; // Assume the start bit gives the correct index for expression
-    fwriter.Append("  _m->%s = (%s) %s;", masterSname, 
+    fwriter.Append("  _m->%s = (%s) ( %s );", masterSname, 
       PrintType((int)masterSignal->TypeRo).c_str(), masterExpr.c_str());
   }
 
@@ -708,26 +708,30 @@ void CiMainGenerator::WriteUnpackBody(const CiExpr_t* sgs)
     {
       continue;
     }
-    // for code shortening
+
     const char* sname = signal.Name.c_str();
 
     // Check if the signal is multiplexed
-    if (signal.Multiplex == MultiplexType::kMulValue)
+    bool isMultiplexed = (signal.Multiplex == MultiplexType::kMulValue);
+    if (isMultiplexed)
     {
       fwriter.Append("  if (_m->%s == %d) {", masterSignal->Name.c_str(), signal.MultiplexValue);
     }
 
+    // Set the indentation level based on whether the signal is multiplexed
+    const char* indent = isMultiplexed ? "    " : "  ";
+
     // Unpack the signal
     if (signal.Signed)
     {
-      fwriter.Append("  _m->%s = (%s) %s(( %s ), %d);",
-        sname, PrintType((int)signal.TypeRo).c_str(),
+      fwriter.Append("%s_m->%s = (%s) %s(( %s ), %d);",
+        indent, sname, PrintType((int)signal.TypeRo).c_str(),
         ext_sig_func_name, expr.c_str(), (int32_t)signal.LengthBit);
     }
     else
     {
-      fwriter.Append("  _m->%s = (%s) ( %s );", sname,
-      PrintType((int)signal.TypeRo).c_str(), expr.c_str());
+      fwriter.Append("%s_m->%s = (%s) ( %s );", indent,
+      sname, PrintType((int)signal.TypeRo).c_str(), expr.c_str());
     }
 
     // Handle physical value conversion if needed
@@ -737,32 +741,31 @@ void CiMainGenerator::WriteUnpackBody(const CiExpr_t* sgs)
 
       if (signal.IsDoubleSig)
       {
-        // for double signals (sigfloat_t) type cast
-        fwriter.Append("  _m->%s = (sigfloat_t)(%s_%s_fromS(_m->%s));",
-          signal.NameFloat.c_str(), fdesc->gen.DRVNAME.c_str(), sname, sname);
+        fwriter.Append("%s_m->%s = (sigfloat_t)(%s_%s_fromS(_m->%s));",
+          indent, signal.NameFloat.c_str(), fdesc->gen.DRVNAME.c_str(), sname, sname);
       }
       else
       {
-      fwriter.Append("  _m->%s = (%s) %s_%s_fromS(_m->%s);",
-        signal.NameFloat.c_str(),
-        PrintType((int)signal.TypePhys).c_str(),
-        fdesc->gen.DRVNAME.c_str(), sname, sname);
+        fwriter.Append("%s_m->%s = (%s) %s_%s_fromS(_m->%s);",
+          indent, signal.NameFloat.c_str(),
+          PrintType((int)signal.TypePhys).c_str(),
+          fdesc->gen.DRVNAME.c_str(), sname, sname);
+      }
+
+      fwriter.Append("#endif // %s", fdesc->gen.usesigfloat_def.c_str());
     }
 
-    fwriter.Append("#endif // %s", fdesc->gen.usesigfloat_def.c_str());
-  }
+    // Close the if statement if the signal was multiplexed
+    if (isMultiplexed)
+    {
+      fwriter.Append("  }");
+    }
 
-  // Close the if statement if the signal was multiplexed
-  if (signal.Multiplex == MultiplexType::kMulValue)
-  {
-    fwriter.Append("  }");
-  }
-
-  // Add a newline after processing the last signal
-  if (num + 1 == sgs->to_signals.size())
-  {
-    fwriter.Append("");
-  }
+    // Add a newline after processing the last signal
+    if (num + 1 == sgs->to_signals.size())
+    {
+      fwriter.Append("");
+    }
   }
 
   // Additional monitor and checksum logic, unchanged
