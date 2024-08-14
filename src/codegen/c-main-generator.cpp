@@ -753,6 +753,7 @@ void CiMainGenerator::WriteUnpackBody(const CiExpr_t* sgs)
       }
 
       fwriter.Append("#endif // %s", fdesc->gen.usesigfloat_def.c_str());
+      fwriter.Append("");
     }
 
     // Close the if statement if the signal was multiplexed
