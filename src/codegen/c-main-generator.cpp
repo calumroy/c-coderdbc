@@ -678,55 +678,94 @@ void CiMainGenerator::WriteSigStructField(const SignalDescriptor_t& sig, bool bi
 
 void CiMainGenerator::WriteUnpackBody(const CiExpr_t* sgs)
 {
+  // Find the master multiplex signal (if any)
+  const SignalDescriptor_t* masterSignal = nullptr;
+  for (const auto& sig : sgs->msg.Signals)
+  {
+    if (sig.Multiplex == MultiplexType::kMaster)
+    {
+      masterSignal = &sig;
+      break;
+    }
+  }
+
+  // If there's a master multiplex signal, unpack it first to get its value
+  if (masterSignal)
+  {
+    const char* masterSname = masterSignal->Name.c_str();
+    auto masterExpr = sgs->to_signals[masterSignal->StartBit / 8]; // Assume the start bit gives the correct index for expression
+    fwriter.Append("  _m->%s = (%s) %s;", masterSname, 
+      PrintType((int)masterSignal->TypeRo).c_str(), masterExpr.c_str());
+  }
+
   for (size_t num = 0; num < sgs->to_signals.size(); num++)
   {
+    const auto& signal = sgs->msg.Signals[num];
     auto expr = sgs->to_signals[num];
 
+    // Skip the master signal as we've already handled it
+    if (&signal == masterSignal)
+    {
+      continue;
+    }
     // for code shortening
-    const char* sname = sgs->msg.Signals[num].Name.c_str();
+    const char* sname = signal.Name.c_str();
 
-    if (sgs->msg.Signals[num].Signed)
+    // Check if the signal is multiplexed
+    if (signal.Multiplex == MultiplexType::kMulValue)
+    {
+      fwriter.Append("  if (_m->%s == %d) {", masterSignal->Name.c_str(), signal.MultiplexValue);
+    }
+
+    // Unpack the signal
+    if (signal.Signed)
     {
       fwriter.Append("  _m->%s = (%s) %s(( %s ), %d);",
-        sname, PrintType((int)sgs->msg.Signals[num].TypeRo).c_str(),
-        ext_sig_func_name, expr.c_str(), (int32_t)sgs->msg.Signals[num].LengthBit);
+        sname, PrintType((int)signal.TypeRo).c_str(),
+        ext_sig_func_name, expr.c_str(), (int32_t)signal.LengthBit);
     }
     else
     {
       fwriter.Append("  _m->%s = (%s) ( %s );", sname,
-        PrintType((int)sgs->msg.Signals[num].TypeRo).c_str(), expr.c_str());
+      PrintType((int)signal.TypeRo).c_str(), expr.c_str());
     }
 
-    // print sigfloat conversion
-    if (!sgs->msg.Signals[num].IsSimpleSig)
+    // Handle physical value conversion if needed
+    if (!signal.IsSimpleSig)
     {
       fwriter.Append("#ifdef %s", fdesc->gen.usesigfloat_def.c_str());
 
-      if (sgs->msg.Signals[num].IsDoubleSig)
+      if (signal.IsDoubleSig)
       {
         // for double signals (sigfloat_t) type cast
         fwriter.Append("  _m->%s = (sigfloat_t)(%s_%s_fromS(_m->%s));",
-          sgs->msg.Signals[num].NameFloat.c_str(), fdesc->gen.DRVNAME.c_str(), sname, sname);
+          signal.NameFloat.c_str(), fdesc->gen.DRVNAME.c_str(), sname, sname);
       }
       else
       {
-        fwriter.Append("  _m->%s = (%s) %s_%s_fromS(_m->%s);",
-          sgs->msg.Signals[num].NameFloat.c_str(),
-          PrintType((int)sgs->msg.Signals[num].TypePhys).c_str(),
-          fdesc->gen.DRVNAME.c_str(), sname, sname);
-      }
-
-      fwriter.Append("#endif // %s", fdesc->gen.usesigfloat_def.c_str());
-      fwriter.Append();
+      fwriter.Append("  _m->%s = (%s) %s_%s_fromS(_m->%s);",
+        signal.NameFloat.c_str(),
+        PrintType((int)signal.TypePhys).c_str(),
+        fdesc->gen.DRVNAME.c_str(), sname, sname);
     }
 
-    else if (num + 1 == sgs->to_signals.size())
-    {
-      // last signal without phys part, put \n manually
-      fwriter.Append("");
-    }
+    fwriter.Append("#endif // %s", fdesc->gen.usesigfloat_def.c_str());
   }
 
+  // Close the if statement if the signal was multiplexed
+  if (signal.Multiplex == MultiplexType::kMulValue)
+  {
+    fwriter.Append("  }");
+  }
+
+  // Add a newline after processing the last signal
+  if (num + 1 == sgs->to_signals.size())
+  {
+    fwriter.Append("");
+  }
+  }
+
+  // Additional monitor and checksum logic, unchanged
   fwriter.Append("#ifdef %s", fdesc->gen.usemon_def.c_str());
   fwriter.Append("  _m->mon1.dlc_error = (dlc_ < %s_DLC);", sgs->msg.Name.c_str());
   fwriter.Append("  _m->mon1.last_cycle = GetSystemTick();");
@@ -735,20 +774,17 @@ void CiMainGenerator::WriteUnpackBody(const CiExpr_t* sgs)
 
   if (sgs->msg.RollSig != nullptr)
   {
-    // Put rolling monitor here
     fwriter.Append("#ifdef %s", fdesc->gen.useroll_def.c_str());
     fwriter.Append("  _m->mon1.roll_error = (_m->%s != _m->%s_expt);",
       sgs->msg.RollSig->Name.c_str(), sgs->msg.RollSig->Name.c_str());
     fwriter.Append("  _m->%s_expt = (_m->%s + 1) & (0x%02XU);", sgs->msg.RollSig->Name.c_str(),
       sgs->msg.RollSig->Name.c_str(), (1 << sgs->msg.RollSig->LengthBit) - 1);
-    // Put rolling monitor here
     fwriter.Append("#endif // %s", fdesc->gen.useroll_def.c_str());
     fwriter.Append();
   }
 
   if (sgs->msg.CsmSig != nullptr)
   {
-    // Put checksum check function call here
     fwriter.Append("#ifdef %s", fdesc->gen.usecsm_def.c_str());
     fwriter.Append("  _m->mon1.csm_error = (((uint8_t)GetFrameHash(_d, %s_DLC, %s_CANID, %s, %d)) != (_m->%s));",
       sgs->msg.Name.c_str(), sgs->msg.Name.c_str(), sgs->msg.CsmMethod.c_str(),
