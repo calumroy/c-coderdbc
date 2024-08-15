@@ -697,7 +697,8 @@ void CiMainGenerator::WriteUnpackBody(const CiExpr_t* sgs)
     fwriter.Append("  _m->%s = (%s) ( %s );", masterSname, 
       PrintType((int)masterSignal->TypeRo).c_str(), masterExpr.c_str());
   }
-
+  
+  // Unpack the rest of the signals
   for (size_t num = 0; num < sgs->to_signals.size(); num++)
   {
     const auto& signal = sgs->msg.Signals[num];
@@ -765,7 +766,10 @@ void CiMainGenerator::WriteUnpackBody(const CiExpr_t* sgs)
     // Add a newline after processing the last signal
     if (num + 1 == sgs->to_signals.size())
     {
-      fwriter.Append("");
+      // No newline if the last signal was a multiplexed signal, as it already has a newline
+      if (signal.IsSimpleSig) {
+        fwriter.Append("");
+      }
     }
   }
 
