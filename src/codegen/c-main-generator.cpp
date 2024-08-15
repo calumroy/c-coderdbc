@@ -31,8 +31,11 @@ const char* extend_func_body =
   "  return ((val ^ m) - m);\n"
   "}\n\n";
 
-void CiMainGenerator::Generate(DbcMessageList_t& dlist, const AppSettings_t& fsd)
+void CiMainGenerator::Generate(DbcMessageList_t& dlist, const AppSettings_t& fsd, bool mux_enabled)
 {
+  // set multiplexor master signal values is enabled for multiplexed signals
+  is_multiplex_enabled = mux_enabled;
+
   // Load income messages to sig printer
   sigprt.LoadMessages(dlist.msgs);
 
@@ -714,13 +717,15 @@ void CiMainGenerator::WriteUnpackBody(const CiExpr_t* sgs)
 
     // Check if the signal is multiplexed
     bool isMultiplexed = (signal.Multiplex == MultiplexType::kMulValue);
-    if (isMultiplexed)
+
+    // Generate the if statement only if multiplex is enabled
+    if (is_multiplex_enabled && isMultiplexed)
     {
       fwriter.Append("  if (_m->%s == %d) {", masterSignal->Name.c_str(), signal.MultiplexValue);
     }
 
     // Set the indentation level based on whether the signal is multiplexed
-    const char* indent = isMultiplexed ? "    " : "  ";
+    const char* indent = (is_multiplex_enabled && isMultiplexed) ? "    " : "  ";
 
     // Unpack the signal
     if (signal.Signed)
@@ -757,8 +762,8 @@ void CiMainGenerator::WriteUnpackBody(const CiExpr_t* sgs)
       fwriter.Append("");
     }
 
-    // Close the if statement if the signal was multiplexed
-    if (isMultiplexed)
+    // Close the if statement if the signal was multiplexed and if multiplexing is enabled
+    if (is_multiplex_enabled && isMultiplexed)
     {
       fwriter.Append("  }");
     }
@@ -811,6 +816,7 @@ void CiMainGenerator::WriteUnpackBody(const CiExpr_t* sgs)
   fwriter.Append("  return %s_CANID;", sgs->msg.Name.c_str());
 }
 
+
 void CiMainGenerator::WritePackStructBody(const CiExpr_t* sgs)
 {
   fwriter.Append("{");
@@ -836,7 +842,7 @@ void CiMainGenerator::WritePackArrayBody(const CiExpr_t* sgs)
 
 void CiMainGenerator::PrintPackCommonText(const std::string& arrtxt, const CiExpr_t* sgs)
 {
-  // this function will print body of packing function
+  // this function will print the body of the packing function
 
   // print array content clearing loop
   fwriter.Append("  uint8_t i; for (i = 0u; i < %s(%s_DLC); %s[i++] = %s);",
@@ -900,8 +906,7 @@ void CiMainGenerator::PrintPackCommonText(const std::string& arrtxt, const CiExp
   // Generate packing code for each byte in the CAN message
   for (size_t i = 0; i < sgs->to_bytes.size(); i++)
   {
-
-    if (masterSignal)
+    if (is_multiplex_enabled && masterSignal)
     {
       bool first = true;
       // Handle the case where only a master multiplexor signal exists and there are no other kMulValue signal types in the CAN msg.
@@ -949,7 +954,8 @@ void CiMainGenerator::PrintPackCommonText(const std::string& arrtxt, const CiExp
     }
     else 
     {
-      // Handle for when there is no master multiplexor signal. Just pack the signal values from all signals making up this byte.
+      // Handle for when there is no master multiplexor signal or when multiplexing is disabled.
+      // Just pack the signal values from all signals making up this byte.
       if ( !sgs->to_bytes[i].empty() )
       {
         fwriter.Append("  %s[%d] |= (uint8_t) ( %s );", arrtxt.c_str(), i, sgs->to_bytes[i].c_str());
