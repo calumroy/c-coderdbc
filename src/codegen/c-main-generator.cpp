@@ -31,8 +31,11 @@ const char* extend_func_body =
   "  return ((val ^ m) - m);\n"
   "}\n\n";
 
-void CiMainGenerator::Generate(DbcMessageList_t& dlist, const AppSettings_t& fsd)
+void CiMainGenerator::Generate(DbcMessageList_t& dlist, const AppSettings_t& fsd, bool mux_enabled)
 {
+  // set multiplexor master signal values is enabled for multiplexed signals
+  is_multiplex_enabled = mux_enabled;
+
   // Load income messages to sig printer
   sigprt.LoadMessages(dlist.msgs);
 
@@ -678,55 +681,106 @@ void CiMainGenerator::WriteSigStructField(const SignalDescriptor_t& sig, bool bi
 
 void CiMainGenerator::WriteUnpackBody(const CiExpr_t* sgs)
 {
+  // Find the master multiplex signal (if any)
+  const SignalDescriptor_t* masterSignal = nullptr;
+  size_t masterSignalIndex = 0;
+  for (size_t i = 0; i < sgs->msg.Signals.size(); ++i)
+  {
+    if (sgs->msg.Signals[i].Multiplex == MultiplexType::kMaster)
+    {
+      masterSignal = &sgs->msg.Signals[i];
+      masterSignalIndex = i;
+      break;
+    }
+  }
+
+  // If there's a master multiplex signal, unpack it first to get its value
+  if (masterSignal)
+  {
+    const char* masterSname = masterSignal->Name.c_str();
+    auto masterExpr = sgs->to_signals[masterSignalIndex];
+    fwriter.Append("  _m->%s = (%s) ( %s );", masterSname, 
+      PrintType((int)masterSignal->TypeRo).c_str(), masterExpr.c_str());
+  }
+  
+  // Unpack the rest of the signals
   for (size_t num = 0; num < sgs->to_signals.size(); num++)
   {
+    const auto& signal = sgs->msg.Signals[num];
     auto expr = sgs->to_signals[num];
 
-    // for code shortening
-    const char* sname = sgs->msg.Signals[num].Name.c_str();
-
-    if (sgs->msg.Signals[num].Signed)
+    // Skip the master signal as we've already handled it
+    if (&signal == masterSignal)
     {
-      fwriter.Append("  _m->%s = (%s) %s(( %s ), %d);",
-        sname, PrintType((int)sgs->msg.Signals[num].TypeRo).c_str(),
-        ext_sig_func_name, expr.c_str(), (int32_t)sgs->msg.Signals[num].LengthBit);
+      continue;
+    }
+
+    const char* sname = signal.Name.c_str();
+
+    // Check if the signal is multiplexed
+    bool isMultiplexed = (signal.Multiplex == MultiplexType::kMulValue);
+
+    // Generate the if statement only if multiplex is enabled
+    if (is_multiplex_enabled && isMultiplexed)
+    {
+      fwriter.Append("  if (_m->%s == %d) {", masterSignal->Name.c_str(), signal.MultiplexValue);
+    }
+
+    // Set the indentation level based on whether the signal is multiplexed
+    const char* indent = (is_multiplex_enabled && isMultiplexed) ? "    " : "  ";
+
+    // Unpack the signal
+    if (signal.Signed)
+    {
+      fwriter.Append("%s_m->%s = (%s) %s(( %s ), %d);",
+        indent, sname, PrintType((int)signal.TypeRo).c_str(),
+        ext_sig_func_name, expr.c_str(), (int32_t)signal.LengthBit);
     }
     else
     {
-      fwriter.Append("  _m->%s = (%s) ( %s );", sname,
-        PrintType((int)sgs->msg.Signals[num].TypeRo).c_str(), expr.c_str());
+      fwriter.Append("%s_m->%s = (%s) ( %s );", indent,
+      sname, PrintType((int)signal.TypeRo).c_str(), expr.c_str());
     }
 
-    // print sigfloat conversion
-    if (!sgs->msg.Signals[num].IsSimpleSig)
+    // Handle physical value conversion if needed
+    if (!signal.IsSimpleSig)
     {
       fwriter.Append("#ifdef %s", fdesc->gen.usesigfloat_def.c_str());
 
-      if (sgs->msg.Signals[num].IsDoubleSig)
+      if (signal.IsDoubleSig)
       {
-        // for double signals (sigfloat_t) type cast
-        fwriter.Append("  _m->%s = (sigfloat_t)(%s_%s_fromS(_m->%s));",
-          sgs->msg.Signals[num].NameFloat.c_str(), fdesc->gen.DRVNAME.c_str(), sname, sname);
+        fwriter.Append("%s_m->%s = (sigfloat_t)(%s_%s_fromS(_m->%s));",
+          indent, signal.NameFloat.c_str(), fdesc->gen.DRVNAME.c_str(), sname, sname);
       }
       else
       {
-        fwriter.Append("  _m->%s = (%s) %s_%s_fromS(_m->%s);",
-          sgs->msg.Signals[num].NameFloat.c_str(),
-          PrintType((int)sgs->msg.Signals[num].TypePhys).c_str(),
+        fwriter.Append("%s_m->%s = (%s) %s_%s_fromS(_m->%s);",
+          indent, signal.NameFloat.c_str(),
+          PrintType((int)signal.TypePhys).c_str(),
           fdesc->gen.DRVNAME.c_str(), sname, sname);
       }
 
       fwriter.Append("#endif // %s", fdesc->gen.usesigfloat_def.c_str());
-      fwriter.Append();
+      fwriter.Append("");
     }
 
-    else if (num + 1 == sgs->to_signals.size())
+    // Close the if statement if the signal was multiplexed and if multiplexing is enabled
+    if (is_multiplex_enabled && isMultiplexed)
     {
-      // last signal without phys part, put \n manually
-      fwriter.Append("");
+      fwriter.Append("  }");
+    }
+
+    // Add a newline after processing the last signal
+    if (num + 1 == sgs->to_signals.size())
+    {
+      // No newline if the last signal was a multiplexed signal, as it already has a newline
+      if (signal.IsSimpleSig) {
+        fwriter.Append("");
+      }
     }
   }
 
+  // Additional monitor and checksum logic, unchanged
   fwriter.Append("#ifdef %s", fdesc->gen.usemon_def.c_str());
   fwriter.Append("  _m->mon1.dlc_error = (dlc_ < %s_DLC);", sgs->msg.Name.c_str());
   fwriter.Append("  _m->mon1.last_cycle = GetSystemTick();");
@@ -735,20 +789,17 @@ void CiMainGenerator::WriteUnpackBody(const CiExpr_t* sgs)
 
   if (sgs->msg.RollSig != nullptr)
   {
-    // Put rolling monitor here
     fwriter.Append("#ifdef %s", fdesc->gen.useroll_def.c_str());
     fwriter.Append("  _m->mon1.roll_error = (_m->%s != _m->%s_expt);",
       sgs->msg.RollSig->Name.c_str(), sgs->msg.RollSig->Name.c_str());
     fwriter.Append("  _m->%s_expt = (_m->%s + 1) & (0x%02XU);", sgs->msg.RollSig->Name.c_str(),
       sgs->msg.RollSig->Name.c_str(), (1 << sgs->msg.RollSig->LengthBit) - 1);
-    // Put rolling monitor here
     fwriter.Append("#endif // %s", fdesc->gen.useroll_def.c_str());
     fwriter.Append();
   }
 
   if (sgs->msg.CsmSig != nullptr)
   {
-    // Put checksum check function call here
     fwriter.Append("#ifdef %s", fdesc->gen.usecsm_def.c_str());
     fwriter.Append("  _m->mon1.csm_error = (((uint8_t)GetFrameHash(_d, %s_DLC, %s_CANID, %s, %d)) != (_m->%s));",
       sgs->msg.Name.c_str(), sgs->msg.Name.c_str(), sgs->msg.CsmMethod.c_str(),
@@ -766,6 +817,7 @@ void CiMainGenerator::WriteUnpackBody(const CiExpr_t* sgs)
 
   fwriter.Append("  return %s_CANID;", sgs->msg.Name.c_str());
 }
+
 
 void CiMainGenerator::WritePackStructBody(const CiExpr_t* sgs)
 {
@@ -792,7 +844,7 @@ void CiMainGenerator::WritePackArrayBody(const CiExpr_t* sgs)
 
 void CiMainGenerator::PrintPackCommonText(const std::string& arrtxt, const CiExpr_t* sgs)
 {
-  // this function will print body of packing function
+  // this function will print the body of the packing function
 
   // print array content clearing loop
   fwriter.Append("  uint8_t i; for (i = 0u; i < %s(%s_DLC); %s[i++] = %s);",
@@ -856,8 +908,7 @@ void CiMainGenerator::PrintPackCommonText(const std::string& arrtxt, const CiExp
   // Generate packing code for each byte in the CAN message
   for (size_t i = 0; i < sgs->to_bytes.size(); i++)
   {
-
-    if (masterSignal)
+    if (is_multiplex_enabled && masterSignal)
     {
       bool first = true;
       // Handle the case where only a master multiplexor signal exists and there are no other kMulValue signal types in the CAN msg.
@@ -905,7 +956,8 @@ void CiMainGenerator::PrintPackCommonText(const std::string& arrtxt, const CiExp
     }
     else 
     {
-      // Handle for when there is no master multiplexor signal. Just pack the signal values from all signals making up this byte.
+      // Handle for when there is no master multiplexor signal or when multiplexing is disabled.
+      // Just pack the signal values from all signals making up this byte.
       if ( !sgs->to_bytes[i].empty() )
       {
         fwriter.Append("  %s[%d] |= (uint8_t) ( %s );", arrtxt.c_str(), i, sgs->to_bytes[i].c_str());
