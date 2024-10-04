@@ -683,11 +683,13 @@ void CiMainGenerator::WriteUnpackBody(const CiExpr_t* sgs)
 {
   // Find the master multiplex signal (if any)
   const SignalDescriptor_t* masterSignal = nullptr;
-  for (const auto& sig : sgs->msg.Signals)
+  size_t masterSignalIndex = 0;
+  for (size_t i = 0; i < sgs->msg.Signals.size(); ++i)
   {
-    if (sig.Multiplex == MultiplexType::kMaster)
+    if (sgs->msg.Signals[i].Multiplex == MultiplexType::kMaster)
     {
-      masterSignal = &sig;
+      masterSignal = &sgs->msg.Signals[i];
+      masterSignalIndex = i;
       break;
     }
   }
@@ -696,7 +698,7 @@ void CiMainGenerator::WriteUnpackBody(const CiExpr_t* sgs)
   if (masterSignal)
   {
     const char* masterSname = masterSignal->Name.c_str();
-    auto masterExpr = sgs->to_signals[masterSignal->StartBit / 8]; // Assume the start bit gives the correct index for expression
+    auto masterExpr = sgs->to_signals[masterSignalIndex];
     fwriter.Append("  _m->%s = (%s) ( %s );", masterSname, 
       PrintType((int)masterSignal->TypeRo).c_str(), masterExpr.c_str());
   }
